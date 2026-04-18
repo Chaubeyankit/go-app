@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ankit.chaubey/myapp/config"
+	"github.com/ankit.chaubey/myapp/internal/auth"
 	"github.com/ankit.chaubey/myapp/internal/middleware"
 	"github.com/ankit.chaubey/myapp/pkg/database"
 	"github.com/ankit.chaubey/myapp/pkg/logger"
@@ -32,7 +33,7 @@ func main() {
 	}
 
 	// Redis Client
-	// TODO: add redis client
+	rdb := database.NewRedis(cfg.Redis)
 
 	//Server
 	app := fiber.New(fiber.Config{
@@ -44,6 +45,7 @@ func main() {
 		AppName:               cfg.App.Name,
 	})
 
+	// Global middleware — order matters
 	app.Use(middleware.RequestID())
 	app.Use(middleware.RequestLogger())
 	app.Use(middleware.Recovery())
@@ -57,9 +59,9 @@ func main() {
 			dbStatus = "degraded"
 		}
 		redisStatus := "ok"
-		// if err := rdb.Ping(c.Context()).Err(); err != nil {
-		// 	redisStatus = "degraded"
-		// }
+		if err := rdb.Ping(c.Context()).Err(); err != nil {
+			redisStatus = "degraded"
+		}
 		return c.JSON(fiber.Map{
 			"status": "ok",
 			"env":    cfg.App.Env,
@@ -70,26 +72,37 @@ func main() {
 		})
 	})
 
-	//TODO: Wire up modules
-	// authHandler := auth.NewHandler(auth.NewService(
-	//     auth.NewRepository(db),
-	//     rdb,
-	//     cfg.JWT,
-	// ))
-	// authHandler.RegisterRoutes(app)
+	// Auth module
+	authRateLimiter := middleware.RateLimiter(rdb, 5, time.Minute, middleware.ByIP)
+	authRepo := auth.NewRepository(db)
+	authTokenStore := auth.NewTokenStore(rdb)
+	authService := auth.NewService(authRepo, authTokenStore, cfg.JWT)
+	authHandler := auth.NewHandler(authService)
+	authHandler.RegisterRoutes(app, authRateLimiter)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		logger.Info("server starting", zap.String("PORT", cfg.App.Addr), zap.String("ENV", cfg.App.Env))
+		logger.Info("server starting",
+			zap.String("addr", cfg.App.Addr),
+			zap.String("env", cfg.App.Env),
+		)
 		if err := app.Listen(cfg.App.Addr); err != nil {
-			logger.Fatal("server error", zap.Error(err))
+			logger.Fatal("server listen error", zap.Error(err))
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Info("shutting down gracefully...")
-	_ = app.Shutdown()
+	logger.Info("shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+		logger.Error("shutdown error", zap.Error(err))
+	}
+
+	logger.Info("server stopped cleanly")
 }
