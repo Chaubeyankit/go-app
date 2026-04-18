@@ -11,8 +11,8 @@
     "max_lifetime": "5m"
   },
   "redis": {
-    "addr": "localhost:6379",
-    "password": "",
+    "REDIS_HOST": "localhost:6379",
+    "REDIS_PASSWORD": "",
     "db": "0"
   },
   "jwt": {

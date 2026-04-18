@@ -77,7 +77,7 @@ func Load() *Config {
 			MaxLifetime:  duration("DATABASE_MAX_LIFETIME", file.Database.MaxLifetime, 5*time.Minute),
 		},
 		Redis: RedisConfig{
-			Addr:     str("REDIS_ADDR", "", "localhost:6379"),
+			Addr:     str("REDIS_HOST", "", "localhost:6379"),
 			Password: str("REDIS_PASSWORD", "", ""),
 			DB:       integer("REDIS_DB", "", 0),
 		},
