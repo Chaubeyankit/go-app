@@ -14,6 +14,9 @@ import (
 	"github.com/ankit.chaubey/myapp/config"
 	"github.com/ankit.chaubey/myapp/internal/auth"
 	"github.com/ankit.chaubey/myapp/internal/middleware"
+	"github.com/ankit.chaubey/myapp/internal/user"
+
+	"github.com/ankit.chaubey/myapp/pkg/cache"
 	"github.com/ankit.chaubey/myapp/pkg/database"
 	"github.com/ankit.chaubey/myapp/pkg/logger"
 )
@@ -79,6 +82,13 @@ func main() {
 	authService := auth.NewService(authRepo, authTokenStore, cfg.JWT)
 	authHandler := auth.NewHandler(authService)
 	authHandler.RegisterRoutes(app, authRateLimiter)
+
+	// User module
+	userRepo := user.NewRepository(db)
+	cacheStore := cache.New(rdb)
+	userService := user.NewService(userRepo, cacheStore)
+	userHandler := user.NewHandler(userService)
+	userHandler.RegisterRoutes(app, cfg.JWT)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
