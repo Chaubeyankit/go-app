@@ -22,6 +22,9 @@ func (h *Handler) RegisterRoutes(app *fiber.App, rateLimiter fiber.Handler) {
 	g.Post("/login", h.Login)
 	g.Post("/refresh", h.Refresh)
 	g.Post("/logout", h.Logout)
+
+	g.Post("/forgot-password", h.ForgotPassword)
+	g.Post("/reset-password", h.ResetPassword)
 }
 
 func (h *Handler) Signup(c *fiber.Ctx) error {
@@ -83,4 +86,41 @@ func (h *Handler) Logout(c *fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(response.OK(fiber.Map{"message": "logged out successfully"}))
+}
+
+func (h *Handler) ForgotPassword(c *fiber.Ctx) error {
+	var req ForgotPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return apperrors.BadRequest("invalid request body")
+	}
+	if fields := validator.Validate(req); fields != nil {
+		return c.Status(422).JSON(
+			response.ErrWithFields(apperrors.UnprocessableEntity("validation failed"), fields),
+		)
+	}
+
+	// Always return 200 regardless of whether the email exists
+	_ = h.svc.ForgotPassword(c.UserContext(), &req)
+	return c.JSON(response.OK(fiber.Map{
+		"message": "if that email is registered, a reset link has been sent",
+	}))
+}
+
+func (h *Handler) ResetPassword(c *fiber.Ctx) error {
+	var req ResetPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return apperrors.BadRequest("invalid request body")
+	}
+	if fields := validator.Validate(req); fields != nil {
+		return c.Status(422).JSON(
+			response.ErrWithFields(apperrors.UnprocessableEntity("validation failed"), fields),
+		)
+	}
+
+	if err := h.svc.ResetPassword(c.UserContext(), &req); err != nil {
+		return err
+	}
+	return c.JSON(response.OK(fiber.Map{
+		"message": "password reset successful, please log in again",
+	}))
 }

@@ -10,17 +10,28 @@ import (
 )
 
 type Config struct {
-	App      AppConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
+	App       AppConfig
+	SMTP      SMTPConfig
+	Database  DatabaseConfig
+	Redis     RedisConfig
+	JWT       JWTConfig
+	Location  LocationConfig
 }
 
 type AppConfig struct {
 	Name           string
 	Env            string
 	Addr           string
+	URL            string
 	AllowedOrigins []string
+}
+
+type SMTPConfig struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
 }
 
 type DatabaseConfig struct {
@@ -43,6 +54,11 @@ type JWTConfig struct {
 	RefreshTTL    time.Duration
 }
 
+type LocationConfig struct {
+	APIKey string
+	APIURL string
+}
+
 // fileConfig mirrors Config but with all fields as plain strings so
 // json.Unmarshal can decode them without custom unmarshalling logic.
 // env vars always win over file values.
@@ -51,6 +67,7 @@ type fileConfig struct {
 		Name           string   `json:"name"`
 		Env            string   `json:"env"`
 		Addr           string   `json:"addr"`
+		URL            string   `json:"url"`
 		AllowedOrigins []string `json:"allowed_origins"`
 	} `json:"app"`
 	Database struct {
@@ -68,6 +85,7 @@ func Load() *Config {
 			Name:           str("APP_NAME", file.App.Name, "myapp"),
 			Env:            str("APP_ENV", file.App.Env, "development"),
 			Addr:           str("APP_ADDR", file.App.Addr, ":8080"),
+			URL:            str("APP_URL", file.App.URL, "http://localhost:8080"),
 			AllowedOrigins: strSlice("APP_ALLOWED_ORIGINS", file.App.AllowedOrigins),
 		},
 		Database: DatabaseConfig{
@@ -86,6 +104,17 @@ func Load() *Config {
 			RefreshSecret: str("JWT_REFRESH_SECRET", "", ""),
 			AccessTTL:     duration("JWT_ACCESS_TTL", "", 15*time.Minute),
 			RefreshTTL:    duration("JWT_REFRESH_TTL", "", 7*24*time.Hour),
+		},
+		SMTP: SMTPConfig{
+			Host:     str("SMTP_HOST", "", ""),
+			Port:     integer("SMTP_PORT", "", 0),
+			Username: str("SMTP_USERNAME", "", ""),
+			Password: str("SMTP_PASSWORD", "", ""),
+			From:     str("SMTP_FROM", "", ""),
+		},
+		Location: LocationConfig{
+			APIKey: str("LOCATION_API_KEY", "", ""),
+			APIURL: str("LOCATION_API_URL", "", ""),
 		},
 	}
 }

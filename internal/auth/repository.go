@@ -16,6 +16,12 @@ type Repository interface {
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
 	UpdateLastLogin(ctx context.Context, id uuid.UUID) error
 	CreateAuditLog(ctx context.Context, log *AuditLog) error
+
+	CreatePasswordReset(ctx context.Context, pr *PasswordReset) error
+	FindPasswordReset(ctx context.Context, tokenHash string) (*PasswordReset, error)
+	MarkPasswordResetUsed(ctx context.Context, id uuid.UUID) error
+	UpdatePassword(ctx context.Context, userID uuid.UUID, newHash string) error
+	InvalidateOldResets(ctx context.Context, userID uuid.UUID) error
 }
 
 type repository struct {
@@ -24,6 +30,43 @@ type repository struct {
 
 func NewRepository(db *gorm.DB) Repository {
 	return &repository{db: db}
+}
+
+func (r *repository) CreatePasswordReset(ctx context.Context, pr *PasswordReset) error {
+	return r.db.WithContext(ctx).Create(pr).Error
+}
+
+func (r *repository) FindPasswordReset(ctx context.Context, tokenHash string) (*PasswordReset, error) {
+	var pr PasswordReset
+	result := r.db.WithContext(ctx).
+		Where("token_hash = ? AND used_at IS NULL AND expires_at > NOW()", tokenHash).
+		First(&pr)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &pr, result.Error
+}
+
+func (r *repository) MarkPasswordResetUsed(ctx context.Context, id uuid.UUID) error {
+	return r.db.WithContext(ctx).
+		Model(&PasswordReset{}).
+		Where("id = ?", id).
+		Update("used_at", gorm.Expr("NOW()")).Error
+}
+
+func (r *repository) UpdatePassword(ctx context.Context, userID uuid.UUID, newHash string) error {
+	return r.db.WithContext(ctx).
+		Model(&User{}).
+		Where("id = ?", userID).
+		Update("password_hash", newHash).Error
+}
+
+func (r *repository) InvalidateOldResets(ctx context.Context, userID uuid.UUID) error {
+	// Mark all existing unused resets for this user as used before issuing a new one
+	return r.db.WithContext(ctx).
+		Model(&PasswordReset{}).
+		Where("user_id = ? AND used_at IS NULL", userID).
+		Update("used_at", gorm.Expr("NOW()")).Error
 }
 
 func (r *repository) Create(ctx context.Context, user *User) error {
