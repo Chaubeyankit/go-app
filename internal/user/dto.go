@@ -10,6 +10,7 @@ type UserResponse struct {
 	Name            string           `json:"name"`
 	Role            string           `json:"role"`
 	IsEmailVerified bool             `json:"isEmailVerified"`
+	MFAEnabled      bool             `json:"mfa_enabled"`
 	LastLoginAt     *time.Time       `json:"lastLoginat,omitempty"`
 	Profile         *ProfileResponse `json:"profile,omitempty"`
 	CreatedAt       time.Time        `json:"createdAt"`
@@ -54,6 +55,7 @@ func toResponse(u *User) UserResponse {
 		Name:            u.Name,
 		Role:            u.Role,
 		IsEmailVerified: u.IsEmailVerified,
+		MFAEnabled:      u.MFAEnabled,
 		LastLoginAt:     u.LastLoginAt,
 		CreatedAt:       u.CreatedAt,
 	}
