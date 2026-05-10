@@ -52,10 +52,14 @@ func InternalError(cause error) *AppError {
 	}
 }
 
-func TooManyRequests() *AppError {
+func TooManyRequests(msg ...string) *AppError {
+	message := "too many requests, please slow down"
+	if len(msg) > 0 && msg[0] != "" {
+		message = msg[0]
+	}
 	return &AppError{
 		Code:       "RATE_LIMIT_EXCEEDED",
-		Message:    "too many requests, please slow down",
+		Message:    message,
 		StatusCode: http.StatusTooManyRequests,
 	}
 }

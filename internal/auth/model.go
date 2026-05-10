@@ -4,6 +4,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"time"
+
+	"github.com/ankit.chaubey/myapp/internal/user"
 )
 
 type UserRole string
@@ -22,9 +24,19 @@ type User struct {
 	IsActive        bool      `gorm:"default:true"`
 	IsEmailVerified bool      `gorm:"default:false"`
 	LastLoginAt     *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	DeletedAt       gorm.DeletedAt `gorm:"index"` // soft delete
+	// MFA fields — added in migration 000004
+	MFAEnabled   bool       `gorm:"column:mfa_enabled;default:false"`
+	MFASecretEnc string     `gorm:"column:mfa_secret_enc"` // TOTP secret (encrypted at rest)
+	MFAEnabledAt *time.Time `gorm:"column:mfa_enabled_at"`
+	// Account lockout fields — added in migration 000006
+	FailedLoginAttempts  int        `gorm:"column:failed_login_attempts;default:0"`
+	LockedUntil          *time.Time `gorm:"column:locked_until;index"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt gorm.DeletedAt `gorm:"index"` // soft delete
+
+	Profile *user.Profile `gorm:"foreignKey:UserID"`
 }
 
 type AuditLog struct {
