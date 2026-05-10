@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"github.com/ankit.chaubey/myapp/config"
+	"github.com/ankit.chaubey/myapp/internal/middleware"
 	"github.com/ankit.chaubey/myapp/pkg/apperrors"
 	"github.com/ankit.chaubey/myapp/pkg/response"
 	"github.com/ankit.chaubey/myapp/pkg/validator"
@@ -8,11 +10,12 @@ import (
 )
 
 type Handler struct {
-	svc Service
+	svc    Service
+	jwtCfg config.JWTConfig
 }
 
-func NewHandler(svc Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc Service, jwtCfg config.JWTConfig) *Handler {
+	return &Handler{svc: svc, jwtCfg: jwtCfg}
 }
 
 func (h *Handler) RegisterRoutes(app *fiber.App, rateLimiter fiber.Handler) {
@@ -21,10 +24,13 @@ func (h *Handler) RegisterRoutes(app *fiber.App, rateLimiter fiber.Handler) {
 	g.Post("/signup", h.Signup)
 	g.Post("/login", h.Login)
 	g.Post("/refresh", h.Refresh)
-	g.Post("/logout", h.Logout)
+	g.Post("/logout", middleware.JWTRefreshAuth(h.jwtCfg), h.Logout)
 
 	g.Post("/forgot-password", h.ForgotPassword)
 	g.Post("/reset-password", h.ResetPassword)
+
+	// Authenticated routes
+	g.Post("/change-password", middleware.JWTAuth(h.jwtCfg), h.ChangePassword)
 }
 
 func (h *Handler) Signup(c *fiber.Ctx) error {
@@ -77,12 +83,13 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 }
 
 func (h *Handler) Logout(c *fiber.Ctx) error {
-	var req LogoutRequest
-	if err := c.BodyParser(&req); err != nil {
-		return apperrors.BadRequest("invalid request body")
+	// Extract refresh token from context (populated by JWTRefreshAuth middleware)
+	refreshToken, ok := c.Locals("refresh_token").(string)
+	if !ok || refreshToken == "" {
+		return apperrors.Unauthorized("missing refresh token")
 	}
 
-	if err := h.svc.Logout(c.UserContext(), req.RefreshToken); err != nil {
+	if err := h.svc.Logout(c.UserContext(), refreshToken); err != nil {
 		return err
 	}
 	return c.JSON(response.OK(fiber.Map{"message": "logged out successfully"}))
@@ -122,5 +129,26 @@ func (h *Handler) ResetPassword(c *fiber.Ctx) error {
 	}
 	return c.JSON(response.OK(fiber.Map{
 		"message": "password reset successful, please log in again",
+	}))
+}
+
+func (h *Handler) ChangePassword(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+
+	var req ChangePasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return apperrors.BadRequest("invalid request body")
+	}
+	if fields := validator.Validate(req); fields != nil {
+		return c.Status(422).JSON(
+			response.ErrWithFields(apperrors.UnprocessableEntity("validation failed"), fields),
+		)
+	}
+
+	if err := h.svc.ChangePassword(c.UserContext(), userID, &req); err != nil {
+		return err
+	}
+	return c.JSON(response.OK(fiber.Map{
+		"message": "password changed successfully, please log in again",
 	}))
 }

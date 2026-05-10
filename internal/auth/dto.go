@@ -15,10 +15,6 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refreshToken" validate:"required"`
 }
 
-type LogoutRequest struct {
-	RefreshToken string `json:"refreshToken" validate:"required"`
-}
-
 type TokenPair struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
@@ -34,6 +30,11 @@ type ResetPasswordRequest struct {
 	NewPassword string `json:"newPassword" validate:"required,min=8,max=72,strongpassword"`
 }
 
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword" validate:"required"`
+	NewPassword     string `json:"newPassword"     validate:"required,min=8,max=72,strongpassword"`
+}
+
 type UserResponse struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
@@ -42,6 +43,8 @@ type UserResponse struct {
 }
 
 type AuthResponse struct {
-	User   UserResponse `json:"user"`
-	Tokens TokenPair    `json:"tokens"`
+	User              UserResponse `json:"user"`
+	Tokens            TokenPair    `json:"tokens"`
+	MFARequired       bool         `json:"mfaRequired,omitempty"`
+	MFAChallengeToken string       `json:"mfaChallengeToken,omitempty"`
 }

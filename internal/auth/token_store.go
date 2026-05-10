@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,11 @@ type TokenStore interface {
 	Exists(ctx context.Context, tokenID string) (bool, error)
 	Revoke(ctx context.Context, tokenID string) error
 	RevokeAll(ctx context.Context, userID string) error
+
+	// Raw key/value operations — used by MFA challenge tokens
+	SetRaw(ctx context.Context, key, value string, ttl time.Duration) error
+	GetRaw(ctx context.Context, key string) (string, error)
+	DeleteRaw(ctx context.Context, key string) error
 }
 
 type redisTokenStore struct {
@@ -64,4 +70,26 @@ func (s *redisTokenStore) RevokeAll(ctx context.Context, userID string) error {
 	}
 	keys = append(keys, userTokensKey(userID))
 	return s.rdb.Del(ctx, keys...).Err()
+}
+
+func (s *redisTokenStore) SetRaw(ctx context.Context, key, value string, ttl time.Duration) error {
+	if err := s.rdb.Set(ctx, key, value, ttl).Err(); err != nil {
+		return fmt.Errorf("tokenStore.SetRaw %q: %w", key, err)
+	}
+	return nil
+}
+
+func (s *redisTokenStore) GetRaw(ctx context.Context, key string) (string, error) {
+	val, err := s.rdb.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil // not found — caller checks for empty string
+	}
+	if err != nil {
+		return "", fmt.Errorf("tokenStore.GetRaw %q: %w", key, err)
+	}
+	return val, nil
+}
+
+func (s *redisTokenStore) DeleteRaw(ctx context.Context, key string) error {
+	return s.rdb.Del(ctx, key).Err()
 }

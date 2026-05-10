@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -27,6 +28,9 @@ import (
 	"github.com/ankit.chaubey/myapp/pkg/email"
 	"github.com/ankit.chaubey/myapp/pkg/location"
 	"github.com/ankit.chaubey/myapp/pkg/queue"
+
+	"github.com/ankit.chaubey/myapp/internal/apikey"
+	"github.com/ankit.chaubey/myapp/internal/auth/oauth"
 )
 
 func main() {
@@ -43,6 +47,14 @@ func main() {
 	// Initialize logger with production settings
 	logger.Init(cfg.App.Env)
 	defer logger.Sync()
+
+	// Validate critical security configuration
+	if cfg.Security.EncryptionKey == "" {
+		logger.Fatal("ENCRYPTION_KEY environment variable must be set (base64-encoded 32 bytes for AES-256-GCM)")
+	}
+	if cfg.JWT.AccessSecret == "" || cfg.JWT.RefreshSecret == "" {
+		logger.Fatal("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET environment variables must be set")
+	}
 
 	// Initialize database with connection pooling
 	db, err := database.NewPostgres(cfg.Database)
@@ -67,14 +79,40 @@ func main() {
 	// --- Auth module (now takes producer) ---
 	authRepo := auth.NewRepository(db)
 	authTokenStore := auth.NewTokenStore(rdb)
-	authService := auth.NewService(authRepo, authTokenStore, producer, cfg.JWT)
-	authHandler := auth.NewHandler(authService)
+
+	// Decode base64-encoded encryption key (must be 32 bytes when decoded)
+	encryptionKey, err := base64.StdEncoding.DecodeString(cfg.Security.EncryptionKey)
+	if err != nil {
+		logger.Fatal("ENCRYPTION_KEY must be valid base64", zap.Error(err))
+	}
+	if len(encryptionKey) != 32 {
+		logger.Fatal("ENCRYPTION_KEY must decode to 32 bytes for AES-256",
+			zap.Int("got", len(encryptionKey)),
+			zap.Int("want", 32))
+	}
+
+	// MFA module (must be created before auth service)
+	mfaService := auth.NewMFAService(authRepo, authTokenStore, cfg.JWT, cfg.App.Name, encryptionKey)
+	mfaHandler := auth.NewMFAHandler(mfaService, rdb)
+
+	authService := auth.NewService(authRepo, authTokenStore, producer, cfg.JWT, mfaService, cfg.Security)
+	authHandler := auth.NewHandler(authService, cfg.JWT)
 
 	// --- User module ---
 	userRepo := user.NewRepository(db)
 	cacheStore := cache.New(rdb)
 	userService := user.NewService(userRepo, cacheStore)
 	userHandler := user.NewHandler(userService)
+
+	apiKeyRepo := apikey.NewRepository(db)
+	apiKeyService := apikey.NewService(apiKeyRepo, cacheStore)
+	apiKeyHandler := apikey.NewHandler(apiKeyService)
+
+	// OAuth module
+	oauthProviders := oauth.Providers(cfg.OAuth)
+	oauthRepo := auth.NewOAuthRepository(db)
+	oauthService := auth.NewOAuthService(oauthProviders, authRepo, oauthRepo, authTokenStore, cfg.JWT, encryptionKey)
+	oauthHandler := auth.NewOAuthHandler(oauthService)
 
 	// --- Fiber app with production optimizations ---
 	app := fiber.New(fiber.Config{
@@ -90,6 +128,7 @@ func main() {
 
 	// Global middleware — order matters
 	app.Use(middleware.RequestID())
+	app.Use(middleware.SecurityHeaders())
 	app.Use(middleware.RequestLogger())
 	app.Use(middleware.Recovery())
 	app.Use(middleware.CORS(cfg.App.AllowedOrigins))
@@ -139,9 +178,16 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ready"})
 	})
 
-	authRL := middleware.RateLimiter(rdb, 5, time.Minute, middleware.ByIP)
+	// Auth endpoint rate limiting (configurable via env)
+	authRL := middleware.RateLimiter(rdb, cfg.Security.AuthRateLimitRequests, cfg.Security.AuthRateLimitWindow, middleware.ByIP)
+	jwtAuth := middleware.JWTAuth(cfg.JWT)
+
+	// Register routes
 	authHandler.RegisterRoutes(app, authRL)
 	userHandler.RegisterRoutes(app, cfg.JWT)
+	oauthHandler.RegisterRoutes(app)
+	mfaHandler.RegisterRoutes(app, cfg.JWT, cfg.Security)
+	apiKeyHandler.RegisterRoutes(app, jwtAuth)
 
 	// --- Email sender with production configuration ---
 	var emailSender email.Sender

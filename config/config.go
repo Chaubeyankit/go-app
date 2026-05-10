@@ -15,7 +15,9 @@ type Config struct {
 	Database  DatabaseConfig
 	Redis     RedisConfig
 	JWT       JWTConfig
+	OAuth     OAuthConfig
 	Location  LocationConfig
+	Security  SecurityConfig
 }
 
 type AppConfig struct {
@@ -59,6 +61,24 @@ type LocationConfig struct {
 	APIURL string
 }
 
+type OAuthConfig struct {
+	GoogleClientID     string
+	GoogleClientSecret string
+	GitHubClientID     string
+	GitHubClientSecret string
+	BaseURL            string
+}
+
+type SecurityConfig struct {
+	EncryptionKey          string        // 32-byte key for AES-256-GCM encryption
+	AccountLockoutThreshold int           // Number of failed attempts before lockout
+	AccountLockoutDuration  time.Duration // How long to lock account
+	MFARateLimitAttempts    int           // MFA attempts allowed
+	MFARateLimitWindow      time.Duration // MFA rate limit time window
+	AuthRateLimitRequests   int           // Auth endpoint requests allowed
+	AuthRateLimitWindow     time.Duration // Auth endpoint rate limit time window
+}
+
 // fileConfig mirrors Config but with all fields as plain strings so
 // json.Unmarshal can decode them without custom unmarshalling logic.
 // env vars always win over file values.
@@ -76,6 +96,37 @@ type fileConfig struct {
 		MaxIdleConns string `json:"max_idle_conns"`
 		MaxLifetime  string `json:"max_lifetime"`
 	} `json:"database"`
+	Redis struct {
+		Addr     string `json:"addr"`
+		Password string `json:"password"`
+		DB       string `json:"db"`
+	} `json:"redis"`
+	JWT struct {
+		AccessSecret  string `json:"access_secret"`
+		RefreshSecret string `json:"refresh_secret"`
+		AccessTTL     string `json:"access_ttl"`
+		RefreshTTL    string `json:"refresh_ttl"`
+	} `json:"jwt"`
+	Location struct {
+		APIKey string `json:"api_key"`
+		APIURL string `json:"api_url"`
+	} `json:"location"`
+	SMTP struct {
+		Host     string `json:"host"`
+		Port     string `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		From     string `json:"from"`
+	} `json:"smtp"`
+	Security struct {
+		EncryptionKey          string `json:"encryption_key"`
+		AccountLockoutThreshold string `json:"account_lockout_threshold"`
+		AccountLockoutDuration  string `json:"account_lockout_duration"`
+		MFARateLimitAttempts    string `json:"mfa_rate_limit_attempts"`
+		MFARateLimitWindow      string `json:"mfa_rate_limit_window"`
+		AuthRateLimitRequests   string `json:"auth_rate_limit_requests"`
+		AuthRateLimitWindow     string `json:"auth_rate_limit_window"`
+	} `json:"security"`
 }
 
 func Load() *Config {
@@ -105,6 +156,13 @@ func Load() *Config {
 			AccessTTL:     duration("JWT_ACCESS_TTL", "", 15*time.Minute),
 			RefreshTTL:    duration("JWT_REFRESH_TTL", "", 7*24*time.Hour),
 		},
+		OAuth: OAuthConfig{
+			GoogleClientID:     str("OAUTH_GOOGLE_CLIENT_ID", "", ""),
+			GoogleClientSecret: str("OAUTH_GOOGLE_CLIENT_SECRET", "", ""),
+			GitHubClientID:     str("OAUTH_GITHUB_CLIENT_ID", "", ""),
+			GitHubClientSecret: str("OAUTH_GITHUB_CLIENT_SECRET", "", ""),
+			BaseURL:            str("APP_BASE_URL", "", "http://localhost:8080"),
+		},
 		SMTP: SMTPConfig{
 			Host:     str("SMTP_HOST", "", ""),
 			Port:     integer("SMTP_PORT", "", 0),
@@ -115,6 +173,15 @@ func Load() *Config {
 		Location: LocationConfig{
 			APIKey: str("LOCATION_API_KEY", "", ""),
 			APIURL: str("LOCATION_API_URL", "", ""),
+		},
+		Security: SecurityConfig{
+			EncryptionKey:          str("ENCRYPTION_KEY", file.Security.EncryptionKey, ""),
+			AccountLockoutThreshold: integer("ACCOUNT_LOCKOUT_THRESHOLD", file.Security.AccountLockoutThreshold, 5),
+			AccountLockoutDuration:  duration("ACCOUNT_LOCKOUT_DURATION", file.Security.AccountLockoutDuration, 15*time.Minute),
+			MFARateLimitAttempts:    integer("MFA_RATE_LIMIT_ATTEMPTS", file.Security.MFARateLimitAttempts, 5),
+			MFARateLimitWindow:      duration("MFA_RATE_LIMIT_WINDOW", file.Security.MFARateLimitWindow, 5*time.Minute),
+			AuthRateLimitRequests:   integer("AUTH_RATE_LIMIT_REQUESTS", file.Security.AuthRateLimitRequests, 5),
+			AuthRateLimitWindow:     duration("AUTH_RATE_LIMIT_WINDOW", file.Security.AuthRateLimitWindow, 1*time.Minute),
 		},
 	}
 }

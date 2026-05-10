@@ -69,3 +69,39 @@ func RequireRole(roles ...string) fiber.Handler {
 		return c.Next()
 	}
 }
+
+// JWTRefreshAuth validates refresh tokens from Authorization header.
+// Extracts and validates the refresh token, injecting user_id and token_id into context.
+func JWTRefreshAuth(cfg config.JWTConfig) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		header := c.Get("Authorization")
+		if header == "" || !strings.HasPrefix(header, "Bearer ") {
+			return c.Status(fiber.StatusUnauthorized).JSON(
+				response.Err(apperrors.Unauthorized("missing authorization header")),
+			)
+		}
+
+		tokenStr := strings.TrimPrefix(header, "Bearer ")
+		claims, err := jwt.ParseRefresh(cfg, tokenStr)
+
+		if err != nil {
+			logger.WithContext(c.UserContext()).Warn("invalid refresh token",
+				zap.String("error", err.Error()),
+				zap.String("ip", c.IP()),
+			)
+			return c.Status(fiber.StatusUnauthorized).JSON(
+				response.Err(apperrors.Unauthorized("invalid or expired refresh token")),
+			)
+		}
+
+		// Inject claims into context and locals for downstream use
+		c.Locals("user_id", claims.UserID)
+		c.Locals("refresh_token_id", claims.TokenID)
+		c.Locals("refresh_token", tokenStr)
+
+		ctx := logger.InjectLogger(c.UserContext(), zap.String("user_id", claims.UserID))
+		c.SetUserContext(ctx)
+
+		return c.Next()
+	}
+}

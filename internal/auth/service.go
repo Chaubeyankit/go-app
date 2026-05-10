@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"encoding/hex"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
@@ -21,7 +23,6 @@ import (
 	"github.com/ankit.chaubey/myapp/pkg/jwt"
 	"github.com/ankit.chaubey/myapp/pkg/logger"
 	"github.com/ankit.chaubey/myapp/pkg/queue"
-	"go.uber.org/zap"
 )
 
 type Service interface {
@@ -32,13 +33,16 @@ type Service interface {
 
 	ForgotPassword(ctx context.Context, req *ForgotPasswordRequest) error
 	ResetPassword(ctx context.Context, req *ResetPasswordRequest) error
+	ChangePassword(ctx context.Context, userID string, req *ChangePasswordRequest) error
 }
 
 type service struct {
-	repo       Repository
-	tokenStore TokenStore
-	jwtCfg     config.JWTConfig
-	producer   *queue.Producer
+	repo        Repository
+	tokenStore  TokenStore
+	jwtCfg      config.JWTConfig
+	producer    *queue.Producer
+	mfaService  MFAService
+	securityCfg config.SecurityConfig
 }
 
 func NewService(
@@ -46,12 +50,16 @@ func NewService(
 	tokenStore TokenStore,
 	producer *queue.Producer,
 	jwtCfg config.JWTConfig,
+	mfamfaService MFAService,
+	securityCfg config.SecurityConfig,
 ) Service {
 	return &service{
-		repo:       repo,
-		tokenStore: tokenStore,
-		producer:   producer,
-		jwtCfg:     jwtCfg,
+		repo:        repo,
+		tokenStore:  tokenStore,
+		producer:    producer,
+		jwtCfg:      jwtCfg,
+		mfaService:  mfamfaService,
+		securityCfg: securityCfg,
 	}
 }
 
@@ -77,6 +85,10 @@ func (s *service) Signup(ctx context.Context, req *SignupRequest) (*AuthResponse
 	}
 
 	if err := s.repo.Create(ctx, user); err != nil {
+		// Check for duplicate key violation (race condition)
+		if IsDuplicateKeyError(err) {
+			return nil, apperrors.Conflict("email already registered")
+		}
 		return nil, apperrors.InternalError(fmt.Errorf("Signup.Create: %w", err))
 	}
 
@@ -112,7 +124,16 @@ func (s *service) Login(ctx context.Context, req *LoginRequest, ip, ua string) (
 		return nil, apperrors.InternalError(fmt.Errorf("Login.FindByEmail: %w", err))
 	}
 
+	// Check if account is locked
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		remainingTime := time.Until(*user.LockedUntil)
+		return nil, apperrors.TooManyRequests(fmt.Sprintf("account locked. try again in %d minutes", int(remainingTime.Minutes()+1)))
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		// Increment failed login attempts
+		_ = s.repo.IncrementFailedLoginAttempts(ctx, user.ID)
+
 		_ = s.repo.CreateAuditLog(ctx, &AuditLog{
 			UserID:    user.ID,
 			Action:    "login_failed",
@@ -120,6 +141,23 @@ func (s *service) Login(ctx context.Context, req *LoginRequest, ip, ua string) (
 			UserAgent: ua,
 		})
 		return nil, apperrors.Unauthorized("invalid credentials")
+	}
+
+	// Reset failed login attempts on successful login
+	_ = s.repo.ResetFailedLoginAttempts(ctx, user.ID)
+
+	// MFA is enabled — don't issue full tokens yet
+	// Return a challenge token instead, client must POST /auth/mfa/challenge
+	if user.MFAEnabled {
+		challengeToken, err := s.mfaService.IssueMFAChallenge(ctx, user.ID.String())
+		if err != nil {
+			return nil, err
+		}
+		// Return 200 with a special shape — frontend detects mfa_required
+		return &AuthResponse{
+			MFARequired:       true,
+			MFAChallengeToken: challengeToken,
+		}, nil
 	}
 
 	// Record successful login (fire-and-forget style — don't block on it)
@@ -260,6 +298,7 @@ func (s *service) ForgotPassword(ctx context.Context, req *ForgotPasswordRequest
 func (s *service) ResetPassword(ctx context.Context, req *ResetPasswordRequest) error {
 	tokenHash := hashToken(req.Token)
 
+	// First, find the token to get the user ID
 	pr, err := s.repo.FindPasswordReset(ctx, tokenHash)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -274,12 +313,11 @@ func (s *service) ResetPassword(ctx context.Context, req *ResetPasswordRequest) 
 	}
 
 	// Update password and mark reset token as used atomically
-	if err := s.repo.UpdatePassword(ctx, pr.UserID, string(newHash)); err != nil {
-		return apperrors.InternalError(fmt.Errorf("ResetPassword UpdatePassword: %w", err))
-	}
-	if err := s.repo.MarkPasswordResetUsed(ctx, pr.ID); err != nil {
-		logger.WithContext(ctx).Error("MarkPasswordResetUsed failed", zap.Error(err))
-		// Non-fatal: password is already changed
+	if err := s.repo.ConsumePasswordReset(ctx, tokenHash, pr.UserID, string(newHash)); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperrors.BadRequest("invalid or expired reset token (may have been already used)")
+		}
+		return apperrors.InternalError(fmt.Errorf("ResetPassword Consume: %w", err))
 	}
 
 	// Revoke all active refresh tokens — forces re-login on all devices
@@ -301,6 +339,53 @@ func (s *service) ResetPassword(ctx context.Context, req *ResetPasswordRequest) 
 
 	logger.WithContext(ctx).Info("password reset successful",
 		zap.String("user_id", pr.UserID.String()),
+	)
+	return nil
+}
+
+func (s *service) ChangePassword(ctx context.Context, userID string, req *ChangePasswordRequest) error {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		return apperrors.BadRequest("invalid user id")
+	}
+
+	user, err := s.repo.FindByID(ctx, uid)
+	if err != nil {
+		return apperrors.NotFound("user")
+	}
+
+	// Verify current password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
+		return apperrors.Unauthorized("current password is incorrect")
+	}
+
+	// Hash new password
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return apperrors.InternalError(fmt.Errorf("ChangePassword bcrypt: %w", err))
+	}
+
+	// Update password
+	if err := s.repo.UpdatePassword(ctx, user.ID, string(newHash)); err != nil {
+		return apperrors.InternalError(fmt.Errorf("ChangePassword UpdatePassword: %w", err))
+	}
+
+	// Revoke all active refresh tokens — forces re-login on all devices
+	_ = s.tokenStore.RevokeAll(ctx, user.ID.String())
+
+	// Send password change notification email
+	changedAt := time.Now().UTC().Format("2006-01-02 15:04:05 MST")
+	_, _ = s.producer.Publish(ctx, queue.StreamEmails, queue.EventPasswordChanged,
+		notification.PasswordChangedPayload{
+			UserID:    user.ID.String(),
+			Email:     user.Email,
+			Name:      user.Name,
+			ChangedAt: changedAt,
+		},
+	)
+
+	logger.WithContext(ctx).Info("password changed",
+		zap.String("user_id", user.ID.String()),
 	)
 	return nil
 }
@@ -331,4 +416,17 @@ func toUserResponse(u *User) UserResponse {
 		Name:  u.Name,
 		Role:  string(u.Role),
 	}
+}
+
+// IsDuplicateKeyError checks if the error is a PostgreSQL duplicate key violation
+func IsDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for PostgreSQL duplicate key error code (23505)
+	errStr := err.Error()
+	return strings.Contains(errStr, "duplicate key") ||
+		strings.Contains(errStr, "SQLSTATE 23505") ||
+		strings.Contains(errStr, "users_email_key")
 }
